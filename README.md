@@ -1,10 +1,15 @@
 # SRMCreditEngine
 
-Plataforma de Cessao de Credito Multimoedas (SRM Credit Engine) - desafio tecnico para vaga de
+Plataforma de Cessao de Credito Multimoedas (SRM Credit Engine) - Desafio Técnico para vaga de
 Engenheiro de Software Senior.
 
 > Implementacao do desafio descrito em `README_case_dev_srm-V1.md` (documento original do
 > processo seletivo, mantido na raiz para referencia).
+
+> **V2 (atual):** banco de dados migrado de SQLite para **PostgreSQL**, com paginacao nativa
+> via `LIMIT/OFFSET` habilitada pelo dialect oficial do Hibernate para PostgreSQL (na V1, o
+> SQLite exigia um dialect customizado sem suporte a paginacao nativa, documentado na secao
+> "Historico de Versoes" ao final deste README).
 
 ---
 
@@ -16,8 +21,8 @@ Engenheiro de Software Senior.
 | Framework       | Spring Boot 2.7.18 (Web, Data JPA, Validation, Actuator, AOP) |
 | Build           | Maven |
 | Frontend        | Thymeleaf + Bootstrap 5 (layout responsivo) + JS vanilla |
-| Banco de Dados  | SQLite (arquivo `srm_credit.db` na raiz do projeto) |
-| Persistencia    | Spring Data JPA (Hibernate) + dialect SQLite customizado (`com.javaricci.config.DialetoSQLite`) |
+| Banco de Dados  | PostgreSQL 16 (via Docker Compose ou instancia gerenciada) |
+| Persistencia    | Spring Data JPA (Hibernate) + dialect oficial `org.hibernate.dialect.PostgreSQL10Dialect` |
 | Relatorios      | `NamedParameterJdbcTemplate` (SQL nativo, 2 camadas, sem passar pelo service) |
 | Documentacao API| springdoc-openapi (Swagger UI) |
 | Resiliencia     | Resilience4j (`@Retry` + `@CircuitBreaker`) |
@@ -31,12 +36,12 @@ Engenheiro de Software Senior.
   adequados para ambiente financeiro (validacao declarativa, transacoes gerenciadas, DI madura).
 - **Spring Boot 2.7.x** (em vez de 3.x): ultima serie LTS-like do Spring Boot que ainda roda em
   Java 11 nativamente (Boot 3.x exige Java 17+), preservando o requisito de Java 11.
-- **SQLite**: solicitado no desafio (banco na raiz do projeto). Usa-se `sqlite-jdbc` como driver
-  JDBC. O artefato `hibernate-community-dialects` (que traz `SQLiteDialect` pronto) **so existe
-  para Hibernate ORM 6+**; como o Spring Boot 2.7.x roda sobre Hibernate 5.6.x, foi criado um
-  dialect proprio e minimo, `com.javaricci.config.DialetoSQLite`, sobre a API estavel de
-  `org.hibernate.dialect.Dialect` (mesma abordagem documentada pela comunidade para SQLite +
-  Hibernate 5.x), evitando depender de artefatos de terceiros nao mantidos.
+- **PostgreSQL (V2)**: banco relacional maduro, com suporte completo a `ALTER TABLE`/foreign keys
+  (ao contrario do SQLite da V1) e dialect oficial mantido pelo proprio Hibernate
+  (`org.hibernate.dialect.PostgreSQL10Dialect`), sem necessidade de nenhum dialect customizado.
+  Esse dialect ja traduz paginacao (`Pageable`/`Specification`) em `LIMIT n OFFSET m` real no SQL
+  gerado - paginacao nativa "de fabrica", sem o fallback em memoria que a V1 precisava usar com
+  SQLite (ver secao "Historico de Versoes").
 - **Thymeleaf**: server-side rendering, simples de manter, sem necessidade de build de SPA
   separado, adequado ao escopo e ao prazo do desafio; combinado com Bootstrap 5 para
   responsividade e JS vanilla (fetch) para a simulacao em tempo real, sem acoplar a um framework
@@ -49,24 +54,42 @@ Engenheiro de Software Senior.
 ### Pre-requisitos
 - JDK 11+
 - Maven 3.8+ (ou usar o wrapper, se disponivel: `./mvnw`)
+- Docker + Docker Compose (para o PostgreSQL local) - ou uma instancia PostgreSQL 12+ propria
 
 ### Rodando localmente
 
 ```bash
+# 1. Sobe o PostgreSQL local (porta 5432, banco/usuario/senha ja configurados)
+docker compose up -d postgres
+
+# 2. Compila e roda a aplicacao (conecta no Postgres via as variaveis de ambiente abaixo,
+#    que ja tem os mesmos valores padrao usados no docker-compose.yml)
 mvn clean install
 mvn spring-boot:run
 ```
 
-A aplicacao sobe em `http://localhost:8080`. O arquivo `srm_credit.db` (SQLite) e criado
-automaticamente na raiz do projeto na primeira execucao, e os dados de referencia (moedas, tipos
-de recebivel, taxas) sao populados automaticamente pelo `SemeadorDados`.
+A aplicacao sobe em `http://localhost:8080`. As tabelas sao criadas automaticamente na primeira
+execucao (`spring.jpa.hibernate.ddl-auto=update`) e os dados de referencia (moedas, tipos de
+recebivel, taxas) sao populados automaticamente pelo `SemeadorDados`.
 
-### Rodando via Docker
+Variaveis de ambiente de conexao (com os valores padrao usados no `docker-compose.yml`):
+
+| Variavel | Padrao |
+|---|---|
+| `DB_HOST` | `localhost` |
+| `DB_PORT` | `5432` |
+| `DB_NAME` | `srm_credit` |
+| `DB_USER` | `srm_user` |
+| `DB_PASSWORD` | `srm_password` |
+
+### Rodando via Docker Compose (aplicacao + banco)
 
 ```bash
-docker build -t srm-credit-engine .
-docker run -p 8080:8080 -v $(pwd)/data:/app/data srm-credit-engine
+docker compose up -d --build
 ```
+
+Sobe o PostgreSQL e a aplicacao juntos, ja conectados entre si (ver `docker-compose.yml`).
+
 
 ### URLs principais
 
@@ -165,6 +188,8 @@ nenhuma excecao interrompa o fluxo de forma abrupta ou vaze stack traces ao clie
 | `ExcecaoNegocio` | 422 |
 | `ExcecaoLiquidacaoConcorrente` / `OptimisticLockingFailureException` | 409 |
 | `MethodArgumentNotValidException` (Bean Validation) | 400 |
+| `PropertyReferenceException` (ex: campo de `sort` invalido) | 400 |
+| `MethodArgumentTypeMismatchException` (parametro fora do formato esperado) | 400 |
 | `IllegalArgumentException` | 400 |
 | Qualquer outra excecao | 500 (log completo, mensagem generica ao cliente) |
 
@@ -173,7 +198,7 @@ nenhuma excecao interrompa o fluxo de forma abrupta ou vaze stack traces ao clie
 ## 4. Modelagem de Dados
 
 Ver `/docs/ER-diagram.md` (diagrama entidade-relacionamento em Mermaid) e `/docs/DDL.sql`
-(script DDL documental do schema SQLite). Ver tambem `/docs/C4-diagrams.md` para os diagramas de
+(script DDL documental do schema PostgreSQL). Ver tambem `/docs/C4-diagrams.md` para os diagramas de
 Contexto e Container (Nivel 1 e 2).
 
 Decisoes de modelagem relevantes:
@@ -185,6 +210,9 @@ Decisoes de modelagem relevantes:
 - `transaction_ledger` grava tambem os insumos do calculo (taxa base, spread, taxa de cambio
   aplicados), nao so o resultado, permitindo reconstruir/auditar qualquer operacao passada mesmo
   que as taxas de referencia mudem depois.
+- **V2:** as chaves estrangeiras (`REFERENCES`) agora sao constraints reais, enforced pelo
+  PostgreSQL - na V1 (SQLite), o dialect customizado desabilitava `ALTER TABLE` para viabilizar
+  `ddl-auto=update`, entao as referencias eram apenas documentais no DDL, sem enforcement do banco.
 
 ---
 
@@ -227,10 +255,12 @@ Documentacao interativa completa (com schemas de request/response) disponivel em
 - **Usabilidade**: painel do operador com feedback de calculo em tempo real (debounce de 350ms),
   grid com filtros e paginacao server-side, mensagens de erro claras e nao-tecnicas na UI.
 - **Seguranca**: validacao de entrada via Bean Validation em todos os endpoints de escrita;
-  nenhuma excecao interrompe o processo abruptamente; segredos/config sensiveis via variavel de
-  ambiente (`SRM_DB_PATH`), nao hardcoded.
+  nenhuma excecao interrompe o processo abruptamente; credenciais de banco via variaveis de
+  ambiente (`DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD`), nao hardcoded.
 - **Desempenho**: relatorios analiticos usam SQL nativo (bypass do ORM) para consultas de grande
-  volume; paginacao server-side evita carregar grids inteiros em memoria.
+  volume; paginacao (`Pageable`/`Specification`) e server-side e, na V2, traduzida em `LIMIT/OFFSET`
+  nativo no SQL gerado pelo dialect PostgreSQL - nao carrega grids inteiros em memoria em nenhuma
+  das duas camadas.
 - **Escalabilidade**: camadas desacopladas (Strategy Pattern para novos produtos sem alterar
   codigo existente; resiliencia a falhas de integracao externa via circuit breaker).
 
@@ -270,9 +300,8 @@ Todo o codigo Java (classes, metodos, campos, variaveis locais, constantes e com
 foi escrito/traduzido em portugues. Duas excecoes deliberadas e documentadas no proprio codigo:
 
 - **Metodos de override de frameworks** (ex: `doFilterInternal` do `FiltroCorrelacaoRequisicao`,
-  `run` do `SemeadorDados`, e os metodos de `Dialect` sobrescritos em `DialetoSQLite` como
-  `hasAlterTable`, `getForUpdateString`, etc.) permanecem com o nome exigido pelo contrato de
-  interface/classe do Spring/Hibernate - traduzi-los quebraria o override.
+  `run` do `SemeadorDados`) permanecem com o nome exigido pelo contrato de interface/classe do
+  Spring - traduzi-los quebraria o override.
 - **Nomes fisicos do banco de dados** (`@Column(name = ...)`, `@Table(name = ...)` e o SQL nativo
   em `RepositorioRelatorioExtrato`) permanecem no schema original em ingles (ja documentado em
   `docs/DDL.sql`), ja que sao strings de schema/dados, nao identificadores Java.
@@ -287,7 +316,40 @@ dos DTOs (ex: `valorFace`, `dataVencimento`, `moedaLiquidacao`).
 
 ---
 
-## 10. Autoria e Uso de IA
+## 10. Historico de Versoes
+
+### V2 (atual) - Migracao para PostgreSQL
+
+- **Banco de dados:** SQLite -> PostgreSQL 16. Removida a dependencia `sqlite-jdbc` e a classe
+  `DialetoSQLite` (dialect Hibernate customizado, necessario na V1 porque o Hibernate 5.6 nao tem
+  suporte oficial a SQLite). Na V2, usa-se o dialect oficial e mantido pelo proprio Hibernate,
+  `org.hibernate.dialect.PostgreSQL10Dialect` - nenhum codigo de dialect proprio e mais necessario.
+- **Paginacao nativa via LIMIT/OFFSET:** o dialect SQLite customizado da V1 deixava
+  `getLimitHandler()` no padrao (`NoopLimitHandler`), ou seja, o Hibernate paginava em memoria via
+  pos-processamento do `ResultSet`. O `PostgreSQL10Dialect` ja usa nativamente
+  `LimitOffsetLimitHandler`, entao toda paginacao (`Pageable` na API/grid de transacoes,
+  `Specification` nos filtros dinamicos) agora gera `LIMIT n OFFSET m` real no SQL, sem
+  necessidade de nenhuma configuracao ou codigo adicional - foi so consequencia de trocar o
+  dialect.
+- **Foreign keys reais:** as constraints `REFERENCES` no schema agora sao enforced pelo banco
+  (o SQLite da V1 tinha `hasAlterTable()`/`dropConstraints()` desabilitados no dialect customizado
+  para viabilizar `ddl-auto=update`, entao as FKs eram apenas documentais).
+- **Infraestrutura local:** adicionado `docker-compose.yml` com um servico PostgreSQL (e,
+  opcionalmente, a propria aplicacao) para desenvolvimento local, substituindo o arquivo
+  `srm_credit.db` que ficava na raiz do projeto na V1.
+- **Configuracao via variaveis de ambiente:** `SRM_DB_PATH` (caminho do arquivo SQLite) foi
+  substituida por `DB_HOST`/`DB_PORT`/`DB_NAME`/`DB_USER`/`DB_PASSWORD`, seguindo o padrao usual
+  de conexao a um banco relacional externo.
+
+### V1 - Entrega inicial (SQLite)
+
+Primeira entrega do desafio, com SQLite como banco de dados (arquivo na raiz do projeto, conforme
+solicitado no enunciado original) e um dialect Hibernate customizado (`DialetoSQLite`) para suprir
+a ausencia de suporte oficial a SQLite no Hibernate 5.6.x.
+
+---
+
+## 11. Autoria e Uso de IA
 
 Consulte `AI_USAGE.md` para detalhes de prompts utilizados, correcoes aplicadas a sugestoes
 incorretas da IA e a analise critica do processo, conforme exigido na Politica de Uso de IA do
